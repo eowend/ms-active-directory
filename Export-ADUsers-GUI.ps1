@@ -22,6 +22,7 @@
     - DialogResult is used when closing the GUI form.
 
 .REQUIREMENTS
+    - Run as Administrator
     - Windows machine joined to the domain or able to query Active Directory
     - RSAT Active Directory PowerShell module
     - Permissions to read users and OUs in Active Directory
@@ -39,6 +40,48 @@
 .VERSION
     1.0.1
 #>
+
+# =========================
+# Administrator requirement
+# =========================
+
+function Test-IsAdministrator {
+    $CurrentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $Principal = New-Object Security.Principal.WindowsPrincipal($CurrentIdentity)
+
+    return $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not (Test-IsAdministrator)) {
+    Write-Host ""
+    Write-Host "This script must be run as Administrator." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Close this window and reopen your PowerShell host using:" -ForegroundColor Yellow
+    Write-Host "Run as administrator" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Supported hosts:" -ForegroundColor Cyan
+    Write-Host "- Windows PowerShell"
+    Write-Host "- PowerShell ISE"
+    Write-Host "- Visual Studio Code PowerShell terminal"
+    Write-Host "- PowerShell 7 terminal"
+    Write-Host ""
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+
+        [System.Windows.Forms.MessageBox]::Show(
+            "This script must be run as Administrator.`n`nClose this window and reopen PowerShell, PowerShell ISE, or your PowerShell host using 'Run as administrator'.",
+            "Administrator Required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+    }
+    catch {
+        # GUI warning could not be shown. Console message is enough.
+    }
+
+    return
+}
 
 # =========================
 # Initial setup
