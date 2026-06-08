@@ -14,6 +14,13 @@
     This avoids relying only on the Enabled property when bulk exports return
     blank or incomplete values.
 
+    This version includes cleanup improvements for PowerShell ISE:
+    - Forms are explicitly disposed.
+    - FolderBrowserDialog is explicitly disposed.
+    - The final MessageBox was removed.
+    - The script uses return instead of exit.
+    - DialogResult is used when closing the GUI form.
+
 .REQUIREMENTS
     - Windows machine joined to the domain or able to query Active Directory
     - RSAT Active Directory PowerShell module
@@ -27,23 +34,33 @@
     .\Export-ADUsers-GUI.ps1
 
 .AUTHOR
-    Juan Ortiz (juan.ortiz@toconnect.net)
     To Connect, LLC
 
 .VERSION
-    1.0.0
+    1.0.1
 #>
 
-#requires -Modules ActiveDirectory
-
-Set-StrictMode -Version Latest
-
 # =========================
-# Load required assemblies
+# Initial setup
 # =========================
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+}
+catch {
+    Write-Error "The Active Directory PowerShell module could not be loaded. Install RSAT or run this script from a system with AD tools."
+    return
+}
+
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+}
+catch {
+    Write-Error "Windows Forms could not be loaded. Run this script from an interactive Windows session."
+    return
+}
 
 # =========================
 # Functions
@@ -63,7 +80,7 @@ function ConvertTo-SafeFileName {
     $InvalidChars = [System.IO.Path]::GetInvalidFileNameChars()
 
     foreach ($Char in $InvalidChars) {
-        $Value = $Value.Replace($Char, "_")
+        $Value = $Value.Replace([string]$Char, "_")
     }
 
     return $Value
@@ -76,7 +93,7 @@ function Get-AccountStatusFromUserAccountControl {
 
     .DESCRIPTION
         The ACCOUNTDISABLE flag has a decimal value of 2.
-        If the bit is present, the account is disabled.
+        If that bit is present, the account is disabled.
     #>
 
     param (
@@ -131,9 +148,11 @@ function Get-OrganizationalUnitPath {
         [string]$DistinguishedName
     )
 
-    $OuComponents = ($DistinguishedName -split '(?<!\\),') |
+    $OuComponents = @(
+        ($DistinguishedName -split '(?<!\\),') |
         Where-Object { $_ -like "OU=*" } |
         ForEach-Object { $_ -replace "^OU=", "" }
+    )
 
     if ($OuComponents.Count -eq 0) {
         return ""
@@ -147,7 +166,7 @@ function Get-OrganizationalUnitPath {
 function Show-AdExportForm {
     <#
     .SYNOPSIS
-        Shows the GUI used to select Search Bases, status, and output folder.
+        Shows the GUI used to select Search Bases, account status, and output folder.
     #>
 
     param (
@@ -192,22 +211,26 @@ function Show-AdExportForm {
     $ButtonSelectAll.Text = "Select All"
     $ButtonSelectAll.Location = New-Object System.Drawing.Point(20, 435)
     $ButtonSelectAll.Size = New-Object System.Drawing.Size(120, 30)
+
     $ButtonSelectAll.Add_Click({
         for ($Index = 0; $Index -lt $CheckedListBox.Items.Count; $Index++) {
             $CheckedListBox.SetItemChecked($Index, $true)
         }
     })
+
     $Form.Controls.Add($ButtonSelectAll)
 
     $ButtonClearAll = New-Object System.Windows.Forms.Button
     $ButtonClearAll.Text = "Clear Selection"
     $ButtonClearAll.Location = New-Object System.Drawing.Point(150, 435)
     $ButtonClearAll.Size = New-Object System.Drawing.Size(130, 30)
+
     $ButtonClearAll.Add_Click({
         for ($Index = 0; $Index -lt $CheckedListBox.Items.Count; $Index++) {
             $CheckedListBox.SetItemChecked($Index, $false)
         }
     })
+
     $Form.Controls.Add($ButtonClearAll)
 
     $LabelStatus = New-Object System.Windows.Forms.Label
@@ -220,10 +243,13 @@ function Show-AdExportForm {
     $ComboStatus.Location = New-Object System.Drawing.Point(170, 481)
     $ComboStatus.Size = New-Object System.Drawing.Size(180, 25)
     $ComboStatus.DropDownStyle = "DropDownList"
+
     [void]$ComboStatus.Items.Add("All")
     [void]$ComboStatus.Items.Add("Enabled")
     [void]$ComboStatus.Items.Add("Disabled")
+
     $ComboStatus.SelectedItem = "All"
+
     $Form.Controls.Add($ComboStatus)
 
     $LabelOutput = New-Object System.Windows.Forms.Label
@@ -242,23 +268,36 @@ function Show-AdExportForm {
     $ButtonBrowse.Text = "Browse..."
     $ButtonBrowse.Location = New-Object System.Drawing.Point(735, 519)
     $ButtonBrowse.Size = New-Object System.Drawing.Size(125, 30)
+
     $ButtonBrowse.Add_Click({
         $FolderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
-        $FolderDialog.Description = "Select the folder where reports will be saved"
 
-        if ($FolderDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            $TextOutput.Text = $FolderDialog.SelectedPath
+        try {
+            $FolderDialog.Description = "Select the folder where reports will be saved"
+            $FolderDialog.ShowNewFolderButton = $true
+
+            if ($FolderDialog.ShowDialog($Form) -eq [System.Windows.Forms.DialogResult]::OK) {
+                $TextOutput.Text = $FolderDialog.SelectedPath
+            }
+        }
+        finally {
+            if ($null -ne $FolderDialog) {
+                $FolderDialog.Dispose()
+            }
         }
     })
+
     $Form.Controls.Add($ButtonBrowse)
 
     $ButtonRun = New-Object System.Windows.Forms.Button
     $ButtonRun.Text = "Generate Report"
     $ButtonRun.Location = New-Object System.Drawing.Point(610, 575)
     $ButtonRun.Size = New-Object System.Drawing.Size(125, 35)
+
     $ButtonRun.Add_Click({
         if ($CheckedListBox.CheckedItems.Count -eq 0) {
             [System.Windows.Forms.MessageBox]::Show(
+                $Form,
                 "Select at least one Search Base.",
                 "Validation",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
@@ -270,6 +309,7 @@ function Show-AdExportForm {
 
         if ([string]::IsNullOrWhiteSpace($TextOutput.Text)) {
             [System.Windows.Forms.MessageBox]::Show(
+                $Form,
                 "Select a report output folder.",
                 "Validation",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
@@ -279,42 +319,58 @@ function Show-AdExportForm {
             return
         }
 
+        $SelectedItems = @()
+
+        foreach ($CheckedItem in $CheckedListBox.CheckedItems) {
+            $SelectedItems += $CheckedItem
+        }
+
         $Form.Tag = [PSCustomObject]@{
-            SelectedSearchBases = @($CheckedListBox.CheckedItems)
+            SelectedSearchBases = $SelectedItems
             Status              = $ComboStatus.SelectedItem
             OutputDirectory     = $TextOutput.Text
         }
 
+        $Form.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $Form.Close()
     })
+
     $Form.Controls.Add($ButtonRun)
 
     $ButtonCancel = New-Object System.Windows.Forms.Button
     $ButtonCancel.Text = "Cancel"
     $ButtonCancel.Location = New-Object System.Drawing.Point(750, 575)
     $ButtonCancel.Size = New-Object System.Drawing.Size(110, 35)
+
     $ButtonCancel.Add_Click({
         $Form.Tag = $null
+        $Form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $Form.Close()
     })
+
     $Form.Controls.Add($ButtonCancel)
 
-    [void]$Form.ShowDialog()
+    $Selection = $null
 
-    return $Form.Tag
+    try {
+        [void]$Form.ShowDialog()
+        $Selection = $Form.Tag
+    }
+    finally {
+        if ($null -ne $Form) {
+            $Form.Dispose()
+        }
+
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+    }
+
+    return $Selection
 }
 
 # =========================
 # Main script
 # =========================
-
-try {
-    Import-Module ActiveDirectory -ErrorAction Stop
-}
-catch {
-    Write-Error "The Active Directory PowerShell module could not be loaded. Install RSAT or run this script from a system with AD tools."
-    exit 1
-}
 
 try {
     $Domain = Get-ADDomain -ErrorAction Stop
@@ -323,7 +379,7 @@ try {
 }
 catch {
     Write-Error "The current Active Directory domain could not be detected."
-    exit 1
+    return
 }
 
 Write-Host "Detected domain: $DomainDnsName" -ForegroundColor Cyan
@@ -352,7 +408,7 @@ try {
 }
 catch {
     Write-Error "Organizational Units could not be loaded from Active Directory."
-    exit 1
+    return
 }
 
 $UserSelection = Show-AdExportForm `
@@ -361,7 +417,7 @@ $UserSelection = Show-AdExportForm `
 
 if ($null -eq $UserSelection) {
     Write-Host "Operation canceled by user." -ForegroundColor Yellow
-    exit 0
+    return
 }
 
 $SelectedSearchBases = $UserSelection.SelectedSearchBases
@@ -440,7 +496,7 @@ foreach ($SearchBaseItem in $SelectedSearchBases) {
                 SelectedSearchBase  = $SearchBaseName
                 DistinguishedName   = $User.DistinguishedName
                 ObjectGUID          = $ObjectGuid
-            })
+            }) | Out-Null
         }
     }
     catch {
@@ -449,8 +505,10 @@ foreach ($SearchBaseItem in $SelectedSearchBases) {
     }
 }
 
-$SortedResults = $Results |
+$SortedResults = @(
+    $Results |
     Sort-Object SelectedSearchBase, AccountStatus, DisplayName
+)
 
 if ($SortedResults.Count -gt 0) {
     $SortedResults |
@@ -485,10 +543,10 @@ Write-Host ""
 Write-Host "Report generated successfully." -ForegroundColor Green
 Write-Host "Users exported: $($SortedResults.Count)"
 Write-Host "Output file: $OutputPath"
+Write-Host ""
+Write-Host "Script completed. You can run it again without closing PowerShell ISE." -ForegroundColor Cyan
 
-[System.Windows.Forms.MessageBox]::Show(
-    "Report generated successfully.`n`nUsers exported: $($SortedResults.Count)`n`n$OutputPath",
-    "Export completed",
-    [System.Windows.Forms.MessageBoxButtons]::OK,
-    [System.Windows.Forms.MessageBoxIcon]::Information
-) | Out-Null
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
+
+return
